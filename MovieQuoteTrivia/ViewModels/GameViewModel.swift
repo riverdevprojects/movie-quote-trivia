@@ -627,10 +627,18 @@ class GameViewModel: ObservableObject {
             print("❌ NON-HOST: Failed to sync - no question available")
             return
         }
-        
+
         print("🔄 NON-HOST: Syncing question #\(gameLogic.currentQuestionIndex)")
         print("🔄 NON-HOST: Question ID: \(question.id), Quote: \(question.quote.prefix(30))...")
-        
+
+        // CRITICAL: Stop any existing timer and freeze FIRST to prevent race conditions
+        gameLogic.stopTimer()
+        isTimerFrozen = true
+
+        // Set timeRemaining to full value IMMEDIATELY before any other state changes
+        // This prevents the timer bar from jumping to zero before going back to full
+        timeRemaining = 10.0
+
         // Set up the question
         currentQuestion = question
         // Build answers array manually (don't use question.allAnswers as it's randomly shuffled)
@@ -638,9 +646,9 @@ class GameViewModel: ObservableObject {
         answersToShuffle.append(question.correctAnswer)
         // Use same deterministic shuffle as host
         shuffledAnswers = deterministicShuffle(array: answersToShuffle, seed: question.id.hashValue)
-        
+
         print("🔄 NON-HOST: Shuffled answers: \(shuffledAnswers)")
-        
+
         displayedText = ""
         selectedAnswer = nil
         hasAnswered = false
@@ -650,8 +658,6 @@ class GameViewModel: ObservableObject {
         showScoreUpdates = false
         answersLocked = false
         hasTriggeredReveal = false
-        // Don't reset timeRemaining - let the timer callback update it when unfrozen
-        // This prevents any visual jolt
         
         // Capture scores BEFORE this round
         scoresBeforeRound = [:]
@@ -681,23 +687,22 @@ class GameViewModel: ObservableObject {
         // The timer will just show less time remaining
         if remaining > -8.0 {  // Allow up to 8 seconds late (still 2 seconds to answer)
             let adjustedRemaining = max(0.1, remaining) // Ensure at least 0.1 seconds
-            
-            // CRITICAL: Stop any existing timer first to prevent overlaps
-            gameLogic.stopTimer()
-            
+
+            // Start the timer (we already stopped any existing timer at the start of this function)
             gameLogic.startTimer(endTime: endTime, onTick: { [weak self] remaining in
                 guard let self = self, !self.isTimerFrozen else { return }
                 self.timeRemaining = remaining
             }, onComplete: { [weak self] in
                 self?.handleTimerComplete()
             })
-            
-            // Set timeRemaining to actual value, then unfreeze
-            // This ensures display is correct immediately when unfrozen
+
+            // Now set the actual remaining time and unfreeze
+            // The timeRemaining was already set to 10.0 at the start to prevent visual glitch
+            // Now update it to the actual remaining time
             timeRemaining = adjustedRemaining
             isTimerFrozen = false
             gamePhase = .playing
-            
+
             // Start periodic check for all players answered
             startPeriodicCheck()
             
