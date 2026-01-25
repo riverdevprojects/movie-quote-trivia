@@ -1,0 +1,26 @@
+# Xcode
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+*.xcworkspace/*
+!*.xcworkspace/contents.xcworkspacedata
+
+# macOS
+.DS_Store
+
+# Build files
+build/
+DerivedData/
+
+# User-specific files
+*.xcuserstate
+*.xcuserdatad/
+
+# CocoaPods
+Pods/
+
+# Swift Package Manager
+.swiftpm/
+
+# Firebase config (if you want to keep it private)
+# GoogleService-Info.plist
