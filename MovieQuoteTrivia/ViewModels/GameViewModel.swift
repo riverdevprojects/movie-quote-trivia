@@ -32,6 +32,7 @@ class GameViewModel: ObservableObject {
     private var hasTriggeredReveal: Bool = false
     private var lastObservedQuestionIndex: Int = -1
     private var lastObservedTimerEndTime: TimeInterval = 0
+    private var isExpectingFreshTimer: Bool = false
 
     enum GamePhase {
         case menu
@@ -591,10 +592,21 @@ class GameViewModel: ObservableObject {
                         // DO NOT sync repeatedly when in roundEnd!
                         if questionChanged || timerChanged || self.gamePhase == .lobby {
                             print("🔄 NON-HOST: Triggering sync - questionChanged: \(questionChanged), timerChanged: \(timerChanged), from lobby: \(self.gamePhase == .lobby)")
+
+                            // Track if we're expecting a fresh timer after question change
+                            // This prevents the timer bar from jumping to zero when sync is called
+                            // with a stale timer before the new timer update arrives
+                            if questionChanged {
+                                self.isExpectingFreshTimer = true
+                            }
+                            if timerChanged && self.isExpectingFreshTimer {
+                                self.isExpectingFreshTimer = false
+                            }
+
                             self.lastObservedQuestionIndex = room.currentQuestionIndex
                             self.lastObservedTimerEndTime = room.timerEndTime
                             self.gameLogic.currentQuestionIndex = room.currentQuestionIndex
-                            
+
                             // Sync IMMEDIATELY, no delay!
                             self.syncNonHostGameState(room: room)
                         }
@@ -683,6 +695,22 @@ class GameViewModel: ObservableObject {
         
         print("🔄 NON-HOST: Timer - endTime: \(endTime), startTime: \(questionStartTime), remaining: \(remaining)")
         
+        // Check if this appears to be a stale timer from the previous round
+        // A fresh timer for a new round should have close to 10 seconds remaining
+        // If we're expecting a fresh timer (question just changed) and remaining is low,
+        // the timer update hasn't arrived yet - wait for it
+        let isFreshTimer = remaining > 8.0
+
+        if isExpectingFreshTimer && !isFreshTimer && remaining > -8.0 {
+            // Question changed but timer is stale - wait for fresh timer update
+            // Keep timeRemaining at 10.0 (already set above) to prevent visual glitch
+            print("⚠️ NON-HOST: Timer appears stale for new question (remaining: \(remaining)s), keeping at full and waiting for fresh timer")
+            gamePhase = .playing
+            startPeriodicCheck()
+            // Don't start actual timer or update timeRemaining - wait for fresh timer
+            return
+        }
+
         // Start timer even if we're late - give player chance to answer
         // The timer will just show less time remaining
         if remaining > -8.0 {  // Allow up to 8 seconds late (still 2 seconds to answer)
@@ -705,7 +733,7 @@ class GameViewModel: ObservableObject {
 
             // Start periodic check for all players answered
             startPeriodicCheck()
-            
+
             if remaining < 0 {
                 print("⚠️ NON-HOST: Synced late (timer started \(abs(remaining)) seconds ago), but allowing gameplay")
             }
@@ -771,6 +799,7 @@ class GameViewModel: ObservableObject {
         questionStartTime = 0
         lastObservedQuestionIndex = -1
         lastObservedTimerEndTime = 0
+        isExpectingFreshTimer = false
     }
 
     deinit {
