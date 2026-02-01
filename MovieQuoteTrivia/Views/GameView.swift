@@ -133,8 +133,8 @@ struct PlayerScoreCard: View {
                 Text(player.avatarEmoji)
                     .font(.title2)
 
-                // Answered indicator
-                if player.hasAnswered {
+                // Answered indicator - use validated check to prevent stale data display
+                if viewModel.shouldShowAnsweredIndicator(for: player) {
                     Circle()
                         .fill(Color.green)
                         .frame(width: 15, height: 15)
@@ -147,14 +147,14 @@ struct PlayerScoreCard: View {
                 }
             }
 
-            // Answer time (appears when answered)
-            if let time = answerTime, player.hasAnswered {
+            // Answer time (appears when answered) - use validated indicator check
+            if let time = answerTime, viewModel.shouldShowAnsweredIndicator(for: player) {
                 Text(time)
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(.cyan)
                     .transition(.scale.combined(with: .opacity))
-            } else if player.hasAnswered {
-                // Spacer to maintain layout
+            } else if viewModel.shouldShowAnsweredIndicator(for: player) {
+                // Spacer to maintain layout when answered but time not yet available
                 Text(" ")
                     .font(.system(size: 10, weight: .bold))
             }
