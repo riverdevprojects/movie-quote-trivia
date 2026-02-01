@@ -34,6 +34,11 @@ class GameViewModel: ObservableObject {
     private var lastObservedTimerEndTime: TimeInterval = 0
     private var isExpectingFreshTimer: Bool = false
 
+    // Track questionStartTime for each round to prevent stale answer time calculations
+    private var currentRoundId: Int = 0
+    // Store answer times calculated locally to prevent sync issues
+    private var localAnswerTimes: [String: Double] = [:]
+
     enum GamePhase {
         case menu
         case lobby
@@ -213,13 +218,19 @@ class GameViewModel: ObservableObject {
         hasTriggeredReveal = false
         isTimerFrozen = false  // Unfreeze timer for new round
         gamePhase = .playing
-        
+
+        // Increment round ID for tracking stale data
+        currentRoundId += 1
+
+        // Clear local answer times for new round
+        localAnswerTimes = [:]
+
         // Capture scores BEFORE this round
         scoresBeforeRound = [:]
         for (id, player) in room.players {
             scoresBeforeRound[id] = player.score
         }
-        
+
         // Clear pending scores for new round
         pendingScores = [:]
 
@@ -296,6 +307,12 @@ class GameViewModel: ObservableObject {
         let answerTime = Date().timeIntervalSince1970
         let isCorrect = gameLogic.isCorrectAnswer(selectedAnswer: answer, question: question)
 
+        // Store the elapsed time locally for reliable display
+        let elapsed = answerTime - questionStartTime
+        if elapsed >= 0 && elapsed <= 10.0 {
+            localAnswerTimes[player.id] = elapsed
+        }
+
         var newScore = player.score
         if isCorrect {
             let points = gameLogic.calculateScore(answerTime: answerTime, questionStartTime: questionStartTime)
@@ -304,7 +321,7 @@ class GameViewModel: ObservableObject {
 
         // Store the new score in pendingScores (will be pushed to Firebase during reveal)
         pendingScores[player.id] = newScore
-        
+
         // Update Firebase with answer info but WITHOUT score update (to prevent score leak)
         firebaseManager.updatePlayerAnswer(playerId: player.id, hasAnswered: true,
                                           answerTime: answerTime, selectedAnswer: answer, for: room.code)
@@ -313,9 +330,15 @@ class GameViewModel: ObservableObject {
     private func handleAIAnswer(playerId: String, answer: String, answerTime: TimeInterval) {
         guard let room = gameRoom,
               let question = currentQuestion,
-              var aiPlayer = room.players[playerId] else { return }
+              let aiPlayer = room.players[playerId] else { return }
 
         let isCorrect = gameLogic.isCorrectAnswer(selectedAnswer: answer, question: question)
+
+        // Store the elapsed time locally for reliable display
+        let elapsed = answerTime - questionStartTime
+        if elapsed >= 0 && elapsed <= 10.0 {
+            localAnswerTimes[playerId] = elapsed
+        }
 
         var newScore = aiPlayer.score
         if isCorrect {
@@ -325,7 +348,7 @@ class GameViewModel: ObservableObject {
 
         // Store in pendingScores like human players (will be pushed during reveal)
         pendingScores[playerId] = newScore
-        
+
         // Update answer info without score
         firebaseManager.updatePlayerAnswer(playerId: playerId, hasAnswered: true,
                                           answerTime: answerTime, selectedAnswer: answer, for: room.code)
@@ -380,29 +403,10 @@ class GameViewModel: ObservableObject {
 
     private func revealAnswersWithPlayers() {
         guard let question = currentQuestion, let room = gameRoom, let player = currentPlayer else { return }
-        
-        // Update scores to Firebase (after all answers are locked in)
-        if player.isHost {
-            // HOST: Update all player scores
-            for (playerId, playerData) in room.players {
-                let finalScore = pendingScores[playerId] ?? playerData.score
-                firebaseManager.updatePlayerScore(playerId: playerId, score: finalScore,
-                                                 hasAnswered: playerData.hasAnswered,
-                                                 answerTime: playerData.lastAnswerTime,
-                                                 selectedAnswer: playerData.selectedAnswer,
-                                                 for: room.code)
-            }
-        } else {
-            // NON-HOST: Update own score only
-            if let myPendingScore = pendingScores[player.id] {
-                firebaseManager.updatePlayerScore(playerId: player.id, score: myPendingScore,
-                                                 hasAnswered: player.hasAnswered,
-                                                 answerTime: player.lastAnswerTime,
-                                                 selectedAnswer: player.selectedAnswer,
-                                                 for: room.code)
-            }
-        }
-        
+
+        // NOTE: Score updates are now pushed to Firebase AFTER reveals complete (see below)
+        // This prevents other players from seeing score changes before the reveal animation finishes
+
         // Sort answers alphabetically
         let sortedAnswers = shuffledAnswers.sorted()
         
@@ -456,12 +460,40 @@ class GameViewModel: ObservableObject {
             totalDelay += 0.3 // Gap before next answer
         }
         
-        // After all revealed, show score updates, then proceed
+        // After all revealed, push scores to Firebase and show score updates, then proceed
+        // Capture room and player for use in async block
+        let capturedRoom = room
+        let capturedPlayer = player
+        let capturedPendingScores = pendingScores
+
         DispatchQueue.main.asyncAfter(deadline: .now() + totalDelay + 0.5) {
+            // NOW push scores to Firebase - after all reveals complete
+            // This prevents other players from seeing new scores before their reveal animation finishes
+            if capturedPlayer.isHost {
+                // HOST: Update all player scores
+                for (playerId, playerData) in capturedRoom.players {
+                    let finalScore = capturedPendingScores[playerId] ?? playerData.score
+                    self.firebaseManager.updatePlayerScore(playerId: playerId, score: finalScore,
+                                                     hasAnswered: playerData.hasAnswered,
+                                                     answerTime: playerData.lastAnswerTime,
+                                                     selectedAnswer: playerData.selectedAnswer,
+                                                     for: capturedRoom.code)
+                }
+            } else {
+                // NON-HOST: Update own score only
+                if let myPendingScore = capturedPendingScores[capturedPlayer.id] {
+                    self.firebaseManager.updatePlayerScore(playerId: capturedPlayer.id, score: myPendingScore,
+                                                     hasAnswered: capturedPlayer.hasAnswered,
+                                                     answerTime: capturedPlayer.lastAnswerTime,
+                                                     selectedAnswer: capturedPlayer.selectedAnswer,
+                                                     for: capturedRoom.code)
+                }
+            }
+
             withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
                 self.showScoreUpdates = true
             }
-            
+
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 self.proceedToNextRound()
             }
@@ -670,13 +702,20 @@ class GameViewModel: ObservableObject {
         showScoreUpdates = false
         answersLocked = false
         hasTriggeredReveal = false
-        
+
+        // Increment round ID for tracking stale data (same as host does)
+        currentRoundId += 1
+
+        // Clear local answer times for new round - prevents stale time display
+        localAnswerTimes = [:]
+
         // Capture scores BEFORE this round
+        // These are the scores at the END of the previous round, which is correct
         scoresBeforeRound = [:]
-        for (id, player) in room.players {
-            scoresBeforeRound[id] = player.score
+        for (id, playerData) in room.players {
+            scoresBeforeRound[id] = playerData.score
         }
-        
+
         // Start typewriter animation
         startTypewriterAnimation(text: question.quote)
         
@@ -750,17 +789,31 @@ class GameViewModel: ObservableObject {
     }
 
     func getAnswerTimeForPlayer(_ player: Player) -> String? {
-        guard let answerTime = player.lastAnswerTime, answerTime > 0, questionStartTime > 0 else { return nil }
-        let elapsed = answerTime - questionStartTime
-        
         // Only show if player actually answered (not just time ran out)
         guard let selectedAnswer = player.selectedAnswer, !selectedAnswer.isEmpty else {
             return nil
         }
-        
-        // Protect against negative or invalid times
-        guard elapsed >= 0 && elapsed <= 10.0 else { return nil }
-        
+
+        // FIRST: Try to use locally calculated answer time (most reliable)
+        if let localElapsed = localAnswerTimes[player.id] {
+            // Validate the local time is reasonable
+            if localElapsed >= 0 && localElapsed <= 10.0 && !localElapsed.isNaN && !localElapsed.isInfinite {
+                return String(format: "%.1fs", localElapsed)
+            }
+        }
+
+        // FALLBACK: Calculate from Firebase data (for other players)
+        guard let answerTime = player.lastAnswerTime, answerTime > 0, questionStartTime > 0 else {
+            return nil
+        }
+
+        let elapsed = answerTime - questionStartTime
+
+        // Protect against negative, invalid, or stale times
+        guard elapsed >= 0 && elapsed <= 10.0 && !elapsed.isNaN && !elapsed.isInfinite else {
+            return nil
+        }
+
         return String(format: "%.1fs", elapsed)
     }
     
@@ -771,6 +824,35 @@ class GameViewModel: ObservableObject {
         }
         // After reveal, show current score
         return player.score
+    }
+
+    /// Check if a player's "answered" indicator should be shown.
+    /// This validates that the answer data is for the current round, not stale data from previous rounds.
+    func shouldShowAnsweredIndicator(for player: Player) -> Bool {
+        // Must have answered flag set
+        guard player.hasAnswered else { return false }
+
+        // Must have a selected answer (not empty string from reset)
+        guard let selectedAnswer = player.selectedAnswer, !selectedAnswer.isEmpty else {
+            return false
+        }
+
+        // If we have a valid answer time (local or calculated), the data is fresh
+        if getAnswerTimeForPlayer(player) != nil {
+            return true
+        }
+
+        // If no valid answer time but selectedAnswer is set, might be transitioning
+        // Check if the lastAnswerTime is reasonable (within this round's timeframe)
+        if let answerTime = player.lastAnswerTime, answerTime > 0, questionStartTime > 0 {
+            let elapsed = answerTime - questionStartTime
+            // If elapsed is way out of range, this is stale data
+            if elapsed < -5.0 || elapsed > 15.0 {
+                return false
+            }
+        }
+
+        return true
     }
 
     // MARK: - Cleanup
@@ -800,6 +882,8 @@ class GameViewModel: ObservableObject {
         lastObservedQuestionIndex = -1
         lastObservedTimerEndTime = 0
         isExpectingFreshTimer = false
+        currentRoundId = 0
+        localAnswerTimes = [:]
     }
 
     deinit {
