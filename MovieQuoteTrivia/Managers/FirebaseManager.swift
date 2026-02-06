@@ -109,6 +109,10 @@ class FirebaseManager: ObservableObject {
             guard snapshot.exists(),
                   let roomDict = snapshot.value as? [String: Any],
                   let room = GameRoom.fromDictionary(roomDict) else {
+                // Room was deleted - notify via nil currentRoom
+                DispatchQueue.main.async {
+                    self?.currentRoom = nil
+                }
                 return
             }
 
@@ -187,6 +191,31 @@ class FirebaseManager: ObservableObject {
         }
     }
 
+    func updatePlayerEmoji(playerId: String, emoji: String, for code: String) {
+        database?.child("rooms").child(code).child("players").child(playerId).child("avatarEmoji").setValue(emoji)
+    }
+
+    func resetRoomForNewGame(code: String) {
+        guard let currentRoom = currentRoom else { return }
+
+        // Reset game state to lobby
+        let roomRef = database?.child("rooms").child(code)
+        roomRef?.child("gameState").setValue(GameRoom.GameState.lobby.rawValue)
+        roomRef?.child("currentRound").setValue(0)
+        roomRef?.child("currentQuestionIndex").setValue(0)
+        roomRef?.child("timerEndTime").setValue(0)
+        roomRef?.child("questionIds").removeValue()
+
+        // Reset all player scores and answer state
+        for playerId in currentRoom.players.keys {
+            let playerRef = roomRef?.child("players").child(playerId)
+            playerRef?.child("score").setValue(0)
+            playerRef?.child("hasAnswered").setValue(false)
+            playerRef?.child("lastAnswerTime").setValue(0)
+            playerRef?.child("selectedAnswer").setValue("")
+        }
+    }
+
     func leaveRoom(playerId: String, code: String) {
         database?.child("rooms").child(code).child("players").child(playerId).removeValue()
         stopObservingRoom()
@@ -208,7 +237,7 @@ class FirebaseManager: ObservableObject {
     // MARK: - Helper Methods
 
     private func generateRoomCode() -> String {
-        let characters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // Removed ambiguous characters
+        let characters = "ABCDEFGHJKLMNPQRSTUVWXYZ" // Only capital letters, no numbers
         return String((0..<6).map { _ in characters.randomElement()! })
     }
 

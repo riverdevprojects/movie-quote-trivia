@@ -5,9 +5,8 @@ struct MainMenuView: View {
     @State private var playerName: String = ""
     @State private var showJoinRoom: Bool = false
     @State private var roomCode: String = ""
-    @State private var selectedDifficulty: Question.Difficulty = .medium
     @FocusState private var isNameFieldFocused: Bool
-    
+
     private let userNameKey = "SavedPlayerName"
 
     var body: some View {
@@ -63,24 +62,6 @@ struct MainMenuView: View {
                             .onChange(of: playerName) { _ in
                                 savePlayerName()
                             }
-                    }
-                    .padding(.horizontal, 40)
-
-                    // Difficulty selection
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Difficulty")
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.8))
-                            .padding(.leading, 5)
-                        
-                        Picker("Difficulty", selection: $selectedDifficulty) {
-                            Text("Easy").tag(Question.Difficulty.easy)
-                            Text("Medium").tag(Question.Difficulty.medium)
-                            Text("Hard").tag(Question.Difficulty.hard)
-                        }
-                        .pickerStyle(SegmentedPickerStyle())
-                        .background(Color.white.opacity(0.2))
-                        .cornerRadius(10)
                     }
                     .padding(.horizontal, 40)
 
@@ -155,23 +136,23 @@ struct MainMenuView: View {
             )
         }
     }
-    
+
     private func loadPlayerName() {
         if let savedName = UserDefaults.standard.string(forKey: userNameKey), !savedName.isEmpty {
             playerName = savedName
         }
     }
-    
+
     private func savePlayerName() {
         UserDefaults.standard.set(playerName, forKey: userNameKey)
     }
 
     private func createSinglePlayerGame() {
-        viewModel.createRoom(playerName: playerName, isSinglePlayer: true, difficulty: selectedDifficulty)
+        viewModel.createRoom(playerName: playerName, isSinglePlayer: true)
     }
 
     private func createMultiplayerRoom() {
-        viewModel.createRoom(playerName: playerName, isSinglePlayer: false, difficulty: selectedDifficulty)
+        viewModel.createRoom(playerName: playerName, isSinglePlayer: false)
     }
 }
 
@@ -243,7 +224,9 @@ struct JoinRoomSheet: View {
                         .multilineTextAlignment(.center)
                         .font(.system(size: 32, weight: .bold, design: .monospaced))
                         .onChange(of: roomCode) { newValue in
-                            roomCode = String(newValue.prefix(6).uppercased())
+                            // Only allow letters, uppercase
+                            let filtered = newValue.uppercased().filter { $0.isLetter }
+                            roomCode = String(filtered.prefix(6))
                         }
                         .padding(.horizontal, 30)
 

@@ -17,7 +17,7 @@ class GameViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var gamePhase: GamePhase = .menu
-    @Published var selectedDifficulty: Question.Difficulty = .medium
+    @Published var selectedDifficulty: Question.Difficulty = .medium // kept for compatibility
     @Published var questionStartTime: TimeInterval = 0
     @Published var showScoreUpdates: Bool = false
     @Published var answersLocked: Bool = false
@@ -59,17 +59,17 @@ class GameViewModel: ObservableObject {
 
     // MARK: - Room Management
 
-    func createRoom(playerName: String, isSinglePlayer: Bool, difficulty: Question.Difficulty = .medium) {
+    func createRoom(playerName: String, isSinglePlayer: Bool) {
         isLoading = true
         errorMessage = nil
 
-        let avatarEmojis = ["🎬", "🍿", "🎭", "🎪", "🎨", "🎯", "🎸", "🎺", "🎻", "🎹"]
-        let randomEmoji = avatarEmojis.randomElement() ?? "🎬"
+        let defaultEmojis = ["🎬", "🍿", "🎭", "🎪", "🎨", "🎯", "🎸", "🎺", "🎻", "🎹"]
+        let randomEmoji = defaultEmojis.randomElement() ?? "🎬"
 
         let player = Player(name: playerName, avatarEmoji: randomEmoji, isHost: true)
         currentPlayer = player
 
-        firebaseManager.createRoom(hostPlayer: player, isSinglePlayer: isSinglePlayer, difficulty: difficulty) { [weak self] result in
+        firebaseManager.createRoom(hostPlayer: player, isSinglePlayer: isSinglePlayer, difficulty: .medium) { [weak self] result in
             DispatchQueue.main.async {
                 self?.isLoading = false
                 switch result {
@@ -127,7 +127,7 @@ class GameViewModel: ObservableObject {
             print("🚪 Already in menu, ignoring duplicate leaveRoom call")
             return
         }
-        
+
         guard let player = currentPlayer, let room = gameRoom else {
             // Even if no room, still cleanup
             print("🚪 No room/player found, performing cleanup")
@@ -137,15 +137,19 @@ class GameViewModel: ObservableObject {
 
         print("🚪 Leaving room - Host: \(player.isHost), Room: \(room.code)")
 
-        if player.isHost {
-            firebaseManager.deleteRoom(code: room.code)
-        } else {
-            firebaseManager.leaveRoom(playerId: player.id, code: room.code)
-        }
+        // Capture info before cleanup clears it
+        let wasHost = player.isHost
+        let roomCode = room.code
+        let playerId = player.id
 
-        // Force cleanup to happen on main thread
-        DispatchQueue.main.async {
-            self.cleanup()
+        // Cleanup local state first (sets gamePhase to .menu, preventing observer re-trigger)
+        cleanup()
+
+        // Then tell Firebase
+        if wasHost {
+            firebaseManager.deleteRoom(code: roomCode)
+        } else {
+            firebaseManager.leaveRoom(playerId: playerId, code: roomCode)
         }
     }
 
@@ -154,22 +158,16 @@ class GameViewModel: ObservableObject {
     func startGame() {
         guard let room = gameRoom, let player = currentPlayer, player.isHost else { return }
 
-        // Use difficulty from room - use a FIXED SEED for deterministic question order
+        // Use a FIXED SEED for deterministic question order across all players
         let seed = room.code.hashValue
-        print("🎮 HOST: Starting game with seed: \(seed), difficulty: \(room.difficulty)")
-        
-        if room.difficulty == .easy {
-            gameLogic.currentQuestions = MovieQuotes.shared.getQuestionsByDifficulty(.easy, count: room.totalRounds, seed: seed)
-        } else if room.difficulty == .medium {
-            gameLogic.currentQuestions = MovieQuotes.shared.getQuestionsByDifficulty(.medium, count: room.totalRounds, seed: seed)
-        } else {
-            gameLogic.currentQuestions = MovieQuotes.shared.getQuestionsByDifficulty(.hard, count: room.totalRounds, seed: seed)
-        }
-        
+        print("🎮 HOST: Starting game with seed: \(seed)")
+
+        gameLogic.currentQuestions = MovieQuotes.shared.getRandomQuestions(count: room.totalRounds, seed: seed)
+
         // Validate questions loaded
         guard gameLogic.currentQuestions.count >= room.totalRounds else {
             print("❌ HOST: Failed to load enough questions")
-            errorMessage = "Failed to load questions for selected difficulty"
+            errorMessage = "Failed to load questions"
             return
         }
         
@@ -377,50 +375,99 @@ class GameViewModel: ObservableObject {
     private func handleTimerComplete() {
         // Stop periodic check
         stopPeriodicCheck()
-        
+
         // Freeze timer immediately to prevent visual countdown
         gameLogic.stopTimer()
         isTimerFrozen = true
         // Don't reset timeRemaining - keep it at whatever it currently is
-        
+
         // Lock answers immediately when timer completes
         answersLocked = true
-        
+
         // Don't trigger multiple times - THIS is where we set the flag
         guard !hasTriggeredReveal else { return }
         hasTriggeredReveal = true
-        
+
         // Timer ran out or all answered, start revealing
         showCorrectAnswer = true
         gamePhase = .roundEnd
         gameLogic.cancelAllAITimers()
-        
+
+        // Push scores to Firebase IMMEDIATELY when timer completes
+        // This ensures scores are synced before the next round starts
+        // The UI display is still controlled by showScoreUpdates flag
+        pushPendingScoresToFirebase()
+
         // Small delay to ensure all Firebase updates are received
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             self.revealAnswersWithPlayers()
         }
     }
 
+    private func pushPendingScoresToFirebase() {
+        guard let room = gameRoom, let player = currentPlayer else { return }
+        let capturedPendingScores = pendingScores
+
+        if player.isHost {
+            // HOST: Update all player scores
+            for (playerId, playerData) in room.players {
+                let finalScore = capturedPendingScores[playerId] ?? playerData.score
+                firebaseManager.updatePlayerScore(playerId: playerId, score: finalScore,
+                                                 hasAnswered: playerData.hasAnswered,
+                                                 answerTime: playerData.lastAnswerTime,
+                                                 selectedAnswer: playerData.selectedAnswer,
+                                                 for: room.code)
+            }
+        } else {
+            // NON-HOST: Update own score
+            if let myPendingScore = capturedPendingScores[player.id] {
+                firebaseManager.updatePlayerScore(playerId: player.id, score: myPendingScore,
+                                                 hasAnswered: true,
+                                                 answerTime: player.lastAnswerTime,
+                                                 selectedAnswer: selectedAnswer,
+                                                 for: room.code)
+            }
+        }
+    }
+
     private func revealAnswersWithPlayers() {
         guard let question = currentQuestion, let room = gameRoom, let player = currentPlayer else { return }
 
-        // NOTE: Score updates are now pushed to Firebase AFTER reveals complete (see below)
-        // This prevents other players from seeing score changes before the reveal animation finishes
+        // Scores already pushed to Firebase in handleTimerComplete()
+        // The UI display is controlled by showScoreUpdates flag
 
         // Sort answers alphabetically
         let sortedAnswers = shuffledAnswers.sorted()
-        
+
         // Group players by their answers, sorted by answer time
+        // Merge local answer data to ensure current player's answer is always included
         var answerGroups: [String: [Player]] = [:]
-        for player in room.players.values {
-            if let selectedAnswer = player.selectedAnswer, !selectedAnswer.isEmpty {
-                if answerGroups[selectedAnswer] == nil {
-                    answerGroups[selectedAnswer] = []
+        for p in room.players.values {
+            var playerAnswer = p.selectedAnswer
+            var playerAnswerTime = p.lastAnswerTime
+
+            // For current player, prefer local data over Firebase (which may be delayed)
+            if p.id == player.id, let localAnswer = selectedAnswer, !localAnswer.isEmpty {
+                playerAnswer = localAnswer
+            }
+            if p.id == player.id, let localTime = localAnswerTimes[player.id] {
+                playerAnswerTime = questionStartTime + localTime
+            }
+
+            if let answer = playerAnswer, !answer.isEmpty {
+                if answerGroups[answer] == nil {
+                    answerGroups[answer] = []
                 }
-                answerGroups[selectedAnswer]?.append(player)
+                var mutablePlayer = p
+                // Update player copy with local data if needed
+                if p.id == player.id {
+                    mutablePlayer.selectedAnswer = playerAnswer
+                    mutablePlayer.lastAnswerTime = playerAnswerTime
+                }
+                answerGroups[answer]?.append(mutablePlayer)
             }
         }
-        
+
         // Sort players within each group by answer time
         for (answer, players) in answerGroups {
             answerGroups[answer] = players.sorted { p1, p2 in
@@ -429,7 +476,7 @@ class GameViewModel: ObservableObject {
                 return time1 < time2
             }
         }
-        
+
         // Reveal each answer with a delay
         var totalDelay = 0.0
         for answer in sortedAnswers {
@@ -440,56 +487,28 @@ class GameViewModel: ObservableObject {
                 }
             }
             totalDelay += 0.3
-            
+
             // Reveal players one by one for this answer
             if let players = answerGroups[answer] {
-                for (index, player) in players.enumerated() {
+                for (index, revealPlayer) in players.enumerated() {
                     let playerDelay = totalDelay + (Double(index) * 0.25)
                     DispatchQueue.main.asyncAfter(deadline: .now() + playerDelay) {
                         if self.revealedPlayers[answer] == nil {
                             self.revealedPlayers[answer] = []
                         }
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-                            self.revealedPlayers[answer]?.append(player.id)
+                            self.revealedPlayers[answer]?.append(revealPlayer.id)
                         }
                     }
                 }
                 totalDelay += Double(players.count) * 0.25
             }
-            
+
             totalDelay += 0.3 // Gap before next answer
         }
-        
-        // After all revealed, push scores to Firebase and show score updates, then proceed
-        // Capture room and player for use in async block
-        let capturedRoom = room
-        let capturedPlayer = player
-        let capturedPendingScores = pendingScores
 
+        // After all revealed, show score updates, then proceed
         DispatchQueue.main.asyncAfter(deadline: .now() + totalDelay + 0.5) {
-            // NOW push scores to Firebase - after all reveals complete
-            // This prevents other players from seeing new scores before their reveal animation finishes
-            if capturedPlayer.isHost {
-                // HOST: Update all player scores
-                for (playerId, playerData) in capturedRoom.players {
-                    let finalScore = capturedPendingScores[playerId] ?? playerData.score
-                    self.firebaseManager.updatePlayerScore(playerId: playerId, score: finalScore,
-                                                     hasAnswered: playerData.hasAnswered,
-                                                     answerTime: playerData.lastAnswerTime,
-                                                     selectedAnswer: playerData.selectedAnswer,
-                                                     for: capturedRoom.code)
-                }
-            } else {
-                // NON-HOST: Update own score only
-                if let myPendingScore = capturedPendingScores[capturedPlayer.id] {
-                    self.firebaseManager.updatePlayerScore(playerId: capturedPlayer.id, score: myPendingScore,
-                                                     hasAnswered: capturedPlayer.hasAnswered,
-                                                     answerTime: capturedPlayer.lastAnswerTime,
-                                                     selectedAnswer: capturedPlayer.selectedAnswer,
-                                                     for: capturedRoom.code)
-                }
-            }
-
             withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
                 self.showScoreUpdates = true
             }
@@ -567,7 +586,16 @@ class GameViewModel: ObservableObject {
     private func observeFirebaseRoom() {
         firebaseManager.$currentRoom
             .sink { [weak self] room in
-                guard let self = self, let room = room else { return }
+                guard let self = self else { return }
+
+                // If room becomes nil while we're in a game, the host deleted the room
+                if room == nil && self.gamePhase != .menu {
+                    print("🚪 Room was deleted by host, returning to menu")
+                    self.cleanup()
+                    return
+                }
+
+                guard let room = room else { return }
 
                 self.gameRoom = room
 
@@ -575,12 +603,45 @@ class GameViewModel: ObservableObject {
                 if let playerId = self.currentPlayer?.id,
                    let updatedPlayer = room.players[playerId] {
                     self.currentPlayer = updatedPlayer
+                } else if let playerId = self.currentPlayer?.id,
+                          room.players[playerId] == nil,
+                          self.gamePhase != .menu {
+                    // Our player was removed from the room
+                    print("🚪 Player removed from room, returning to menu")
+                    self.cleanup()
+                    return
                 }
 
                 // Sync game state
                 switch room.gameState {
                 case .lobby:
                     if self.gamePhase != .lobby {
+                        // If returning from gameOver to lobby, reset local game state
+                        if self.gamePhase == .gameOver || self.gamePhase == .playing || self.gamePhase == .roundEnd {
+                            self.typewriterTimer?.invalidate()
+                            self.checkTimer?.invalidate()
+                            self.gameLogic.cleanup()
+                            self.currentQuestion = nil
+                            self.displayedText = ""
+                            self.shuffledAnswers = []
+                            self.selectedAnswer = nil
+                            self.hasAnswered = false
+                            self.showCorrectAnswer = false
+                            self.revealedAnswers = []
+                            self.revealedPlayers = [:]
+                            self.showScoreUpdates = false
+                            self.answersLocked = false
+                            self.hasTriggeredReveal = false
+                            self.isTimerFrozen = false
+                            self.scoresBeforeRound = [:]
+                            self.pendingScores = [:]
+                            self.questionStartTime = 0
+                            self.lastObservedQuestionIndex = -1
+                            self.lastObservedTimerEndTime = 0
+                            self.isExpectingFreshTimer = false
+                            self.currentRoundId = 0
+                            self.localAnswerTimes = [:]
+                        }
                         self.gamePhase = .lobby
                     }
                 case .playing:
@@ -855,12 +916,69 @@ class GameViewModel: ObservableObject {
         return true
     }
 
+    // MARK: - Emoji Selection
+
+    func updatePlayerEmoji(_ emoji: String) {
+        guard let player = currentPlayer, let room = gameRoom else { return }
+        // Check emoji not already taken by another player
+        let takenEmojis = room.players.values.filter { $0.id != player.id }.map { $0.avatarEmoji }
+        guard !takenEmojis.contains(emoji) else { return }
+
+        currentPlayer?.avatarEmoji = emoji
+        firebaseManager.updatePlayerEmoji(playerId: player.id, emoji: emoji, for: room.code)
+    }
+
+    func isEmojiTaken(_ emoji: String) -> Bool {
+        guard let room = gameRoom, let player = currentPlayer else { return false }
+        return room.players.values.contains { $0.id != player.id && $0.avatarEmoji == emoji }
+    }
+
+    // MARK: - Return to Lobby
+
+    func returnToLobby() {
+        guard let room = gameRoom, let player = currentPlayer else { return }
+
+        // Reset game state but keep the room
+        typewriterTimer?.invalidate()
+        checkTimer?.invalidate()
+        gameLogic.cleanup()
+
+        currentQuestion = nil
+        displayedText = ""
+        shuffledAnswers = []
+        selectedAnswer = nil
+        hasAnswered = false
+        showCorrectAnswer = false
+        revealedAnswers = []
+        revealedPlayers = [:]
+        showScoreUpdates = false
+        answersLocked = false
+        hasTriggeredReveal = false
+        isTimerFrozen = false
+        scoresBeforeRound = [:]
+        pendingScores = [:]
+        questionStartTime = 0
+        lastObservedQuestionIndex = -1
+        lastObservedTimerEndTime = 0
+        isExpectingFreshTimer = false
+        currentRoundId = 0
+        localAnswerTimes = [:]
+
+        gamePhase = .lobby
+
+        // Host resets the room state in Firebase
+        if player.isHost {
+            firebaseManager.resetRoomForNewGame(code: room.code)
+        }
+    }
+
     // MARK: - Cleanup
 
     private func cleanup() {
         gameLogic.cleanup()
         typewriterTimer?.invalidate()
         checkTimer?.invalidate()
+        firebaseManager.stopObservingRoom()
         gamePhase = .menu
         currentPlayer = nil
         gameRoom = nil

@@ -847,6 +847,26 @@ class MovieQuotes {
         return Array(shuffled.prefix(count))
     }
     
+    /// Returns a deterministic selection of questions from ALL difficulties using a seed (for multiplayer sync)
+    func getRandomQuestions(count: Int, seed: Int) -> [Question] {
+        let pool = allQuotes
+
+        guard pool.count >= count else {
+            print("⚠️ Not enough questions (\(pool.count)), returning all available")
+            return pool
+        }
+
+        // Use seeded shuffle for deterministic ordering
+        var rng = SeededRandomNumberGenerator(seed: seed)
+        var shuffled = pool
+        for i in (1..<shuffled.count).reversed() {
+            let j = Int(rng.next() % UInt64(i + 1))
+            shuffled.swapAt(i, j)
+        }
+
+        return Array(shuffled.prefix(count))
+    }
+
     /// Returns questions by their IDs (for multiplayer sync)
     func getQuestionsByIds(_ ids: [String]) -> [Question] {
         print("🔍 Looking for \(ids.count) questions by ID")

@@ -56,11 +56,12 @@ struct VictoryView: View {
                 Spacer()
 
                 // Buttons
-                VStack(spacing: 15) {
+                VStack(spacing: 12) {
+                    // Play Again - returns to lobby (available for everyone)
                     Button(action: {
-                        viewModel.leaveRoom()
+                        viewModel.returnToLobby()
                     }) {
-                        Text("Back to Menu")
+                        Text("Play Again")
                             .font(.title3)
                             .fontWeight(.semibold)
                             .foregroundColor(.white)
@@ -68,13 +69,27 @@ struct VictoryView: View {
                             .padding()
                             .background(
                                 LinearGradient(
-                                    gradient: Gradient(colors: [.blue, .purple]),
+                                    gradient: Gradient(colors: [.green, .blue]),
                                     startPoint: .leading,
                                     endPoint: .trailing
                                 )
                             )
                             .cornerRadius(15)
-                            .shadow(color: .blue.opacity(0.5), radius: 10)
+                            .shadow(color: .green.opacity(0.5), radius: 10)
+                    }
+                    .padding(.horizontal, 25)
+
+                    // Leave/Close - host closes room, non-host leaves
+                    Button(action: {
+                        viewModel.leaveRoom()
+                    }) {
+                        Text(viewModel.currentPlayer?.isHost == true ? "Close Room" : "Leave Room")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.red.opacity(0.6))
+                            .cornerRadius(10)
                     }
                     .padding(.horizontal, 25)
                 }
